@@ -201,92 +201,200 @@ final class GameVM: ObservableObject {
 extension GameVM {
     // Create a random partition into N regions (each region has N cells)
     static func makeRegions(size N: Int) -> [[Int]] {
-        // Connected region generator: N regions, each exactly N cells, 4-neighbor connected.
-        // If we get stuck, we restart up to a few tries.
+        // Connected, compact-biased region generator
+        func degree(_ grid: [[Int]], _ r: Int, _ c: Int) -> Int {
+            let id = grid[r][c]
+            let nbrs = [(r-1,c),(r+1,c),(r,c-1),(r,c+1)]
+            var d = 0
+            for (rr,cc) in nbrs where (0..<N).contains(rr) && (0..<N).contains(cc) {
+                if grid[rr][cc] == id { d += 1 }
+            }
+            return d
+        }
         func attempt() -> [[Int]]? {
             var grid = Array(repeating: Array(repeating: -1, count: N), count: N)
-            // Pick N distinct random seeds
-            var all = Array(0..<(N*N)); all.shuffle()
-            let seeds = Array(all.prefix(N))
-            var frontiers: [[(Int,Int)]] = Array(repeating: [], count: N)
-            for (rid, cell) in seeds.enumerated() {
-                let r = cell / N, c = cell % N
-                grid[r][c] = rid
-                // initialize frontier with its 4-neighbors
-                let nbrs = [(r-1,c),(r+1,c),(r,c-1),(r,c+1)].filter{ (rr,cc) in (0..<N).contains(rr) && (0..<N).contains(cc) && grid[rr][cc] == -1 }
-                frontiers[rid].append(contentsOf: nbrs)
-            }
-            var sizes = Array(repeating: 1, count: N)
-            // Grow each region until size N
-            while true {
-                if sizes.allSatisfy({ $0 == N }) { break }
-                // Choose a region that still needs cells and has frontier
-                let candidates = (0..<N).filter{ sizes[$0] < N && !frontiers[$0].isEmpty }
-                if candidates.isEmpty { return nil } // stuck
-                let rid = candidates.randomElement()!
-                // pick a frontier cell
-                var f = frontiers[rid]
-                let idx = Int.random(in: 0..<f.count)
-                let (r,c) = f[idx]
-                // if already taken by someone else, drop and continue
-                if grid[r][c] != -1 {
-                    frontiers[rid].remove(at: idx)
-                    continue
+            var sizes = Array(repeating: 0, count: N)
+            // seeds in a grid-ish pattern to encourage compactness
+            var seeds: [(Int,Int)] = []
+            var unused = Array(0..<(N*N)).map { ($0 / N, $0 % N) }  // all cells
+            seeds.append((N/2, N/2))
+            for _ in 1..<N {
+                // pick the cell farthest from all current seeds (Manhattan distance)
+                var best: (Int,Int)? = nil
+                var bestD = -1
+                for (r,c) in unused {
+                    var dmin = Int.max
+                    for (sr,sc) in seeds {
+                        let d = abs(sr - r) + abs(sc - c)
+                        if d < dmin { dmin = d }
+                    }
+                    if dmin > bestD { bestD = dmin; best = (r,c) }
                 }
-                // claim it
+                seeds.append(best!)
+                // keep list inexpensive
+                unused.removeAll(where: { cell in seeds.contains(where: { $0 == cell }) })
+            }
+            var pool = Array(0..<(N*N)); pool.shuffle()
+            for rid in 0..<N {
+                let idx = pool[rid]
+                seeds.append((idx / N, idx % N))
+            }
+            var frontiers: [[(Int,Int)]] = Array(repeating: [], count: N)
+            for rid in 0..<N {
+                let (r,c) = seeds[rid]
+                grid[r][c] = rid
+                sizes[rid] = 1
+                for (rr,cc) in [(r-1,c),(r+1,c),(r,c-1),(r,c+1)] where (0..<N).contains(rr) && (0..<N).contains(cc) { frontiers[rid].append((rr,cc)) }
+            }
+            while sizes.contains(where: { $0 < N }) {
+                let options = (0..<N).filter { sizes[$0] < N && !frontiers[$0].isEmpty }
+                if options.isEmpty { return nil }
+                let rid = options.randomElement()!
+                // score frontier cells by: many same-region neighbors if assigned, and closeness to centroid
+                let f = frontiers[rid]
+                // centroid
+                var cr = 0, cc = 0, cnt = 0
+                for r in 0..<N { for c in 0..<N { if grid[r][c] == rid { cr += r; cc += c; cnt += 1 } } }
+                let cen = (Double(cr)/Double(max(1,cnt)), Double(cc)/Double(max(1,cnt)))
+                var best: (Int,Int)? = nil
+                var bestScore = -1_000_000.0
+                for (i,(r,c)) in f.enumerated() {
+                    if !(0..<N).contains(r) || !(0..<N).contains(c) { continue }
+                    if grid[r][c] != -1 { continue }
+                    // neighbors already this region if we took it
+                    var same = 0
+                    for (rr,cc) in [(r-1,c),(r+1,c),(r,c-1),(r,c+1)] {
+                        if (0..<N).contains(rr) && (0..<N).contains(cc) && grid[rr][cc] == rid { same += 1 }
+                    }
+                    let dist = -hypot(Double(r)-cen.0, Double(c)-cen.1) // prefer closer to centroid
+                    let score = Double(same*10) + dist + Double.random(in: 0..<0.1)
+                    if score > bestScore { bestScore = score; best = (r,c) }
+                    // small cleanup: remove out-of-grid or already taken entries occasionally
+                    if i % 5 == 0 && (grid[r][c] != -1) { /* drop later */ }
+                }
+                guard let pick = best else { return nil }
+                let (r,c) = pick
                 grid[r][c] = rid
                 sizes[rid] += 1
-                // add its free neighbors to this region's frontier
-                for (rr,cc) in [(r-1,c),(r+1,c),(r,c-1),(r,c+1)] {
-                    if (0..<N).contains(rr) && (0..<N).contains(cc) && grid[rr][cc] == -1 {
-                        frontiers[rid].append((rr,cc))
-                    }
+                for (rr,cc) in [(r-1,c),(r+1,c),(r,c-1),(r,c+1)] where (0..<N).contains(rr) && (0..<N).contains(cc) && grid[rr][cc] == -1 {
+                    frontiers[rid].append((rr,cc))
                 }
-                // remove duplicates to keep frontier small
+                // optional prune duplicates
                 var seen = Set<Int>()
-                frontiers[rid] = frontiers[rid].filter{ (rr,cc) in
-                    let key = rr*N+cc
-                    if seen.contains(key) { return false }
-                    seen.insert(key); return true
-                }
+                frontiers[rid] = frontiers[rid].filter { (rr,cc) in let key = rr*N+cc; defer { seen.insert(key) }; return !seen.contains(key) }
+            }
+            // smoothing pass: try to eliminate degree-1 "nubs" via swaps
+            for _ in 0..<N*N {
+                var changed = false
+                for r in 0..<N { for c in 0..<N {
+                    let d = degree(grid, r, c)
+                    if d <= 1 {
+                        let my = grid[r][c]
+                        // try swapping with neighbor of different region
+                        for (rr,cc) in [(r-1,c),(r+1,c),(r,c-1),(r,c+1)] where (0..<N).contains(rr) && (0..<N).contains(cc) {
+                            if grid[rr][cc] == my { continue }
+                            var g2 = grid
+                            let other = g2[rr][cc]
+                            g2[r][c] = other; g2[rr][cc] = my
+                            if degree(g2, r, c) >= 2 && degree(g2, rr, cc) >= 2 {
+                                grid = g2
+                                changed = true
+                                break
+                            }
+                        }
+                    }
+                }}
+                if !changed { break }
             }
             return grid
         }
-        for _ in 0..<50 { if let g = attempt() { return g } }
-        // Fallback to simple rows if generation fails
+        for _ in 0..<40 { if let g = attempt() { return g } }
+        // Fallback to rows
         return (0..<N).map { r in Array(repeating: r, count: N) }
     }
-
-    // Backtracking solver to find one valid queen placement
+    
+    // Backtracking: return one valid solution, or nil
     static func solve(size N: Int, regions: [[Int]]) -> [BoardIndex]? {
-        var colUsed = Array(repeating: false, count: N)
-        var regUsed = Array(repeating: false, count: N)
-        var sol = Array(repeating: -1, count: N) // sol[r] = c
-        func isAdjDiag(_ r1:Int,_ c1:Int,_ r2:Int,_ c2:Int) -> Bool { abs(r1-r2)==1 && abs(c1-c2)==1 }
-        func dfs(_ r:Int) -> Bool {
-            if r==N { return true }
-            for c in 0..<N where !colUsed[c] {
-                let rg = regions[r][c]; if regUsed[rg] { continue }
-                var ok=true
-                for rr in 0..<r { if isAdjDiag(rr, sol[rr], r, c) { ok=false; break } }
-                if !ok { continue }
-                sol[r]=c; colUsed[c]=true; regUsed[rg]=true
-                if dfs(r+1) { return true }
-                sol[r]-=1; colUsed[c]=false; regUsed[rg]=false
+        var count = 0
+        var last: [Int] = []
+
+        func enumerate(limit: Int) -> Int {
+            var colUsed = Array(repeating: false, count: N)
+            var regUsed = Array(repeating: false, count: N)
+            var sol     = Array(repeating: -1,  count: N)
+
+            func isAdjDiag(_ r1:Int,_ c1:Int,_ r2:Int,_ c2:Int) -> Bool { abs(r1 - r2) == 1 && abs(c1 - c2) == 1 }
+
+            func dfs(_ r:Int) {
+                if count >= limit { return }
+                if r == N { count += 1; last = sol; return }
+
+                for c in 0..<N where !colUsed[c] {
+                    let rg = regions[r][c]; if regUsed[rg] { continue }
+                    var ok = true
+                    for rr in 0..<r { if isAdjDiag(rr, sol[rr], r, c) { ok = false; break } }
+                    if !ok { continue }
+
+                    sol[r] = c; colUsed[c] = true; regUsed[rg] = true
+                    dfs(r + 1)
+                    sol[r] = -1; colUsed[c] = false; regUsed[rg] = false
+
+                    if count >= limit { return }
+                }
             }
-            return false
+
+            dfs(0)
+            return count
         }
-        return dfs(0) ? (0..<N).map{ BoardIndex(r:$0,c:sol[$0]) } : nil
+
+        let total = enumerate(limit: 1)
+        return total == 1 ? (0..<N).map { BoardIndex(r: $0, c: last[$0]) } : nil
     }
 
-    static func generateSolvablePuzzle(size N: Int, maxTries: Int = 200) -> Puzzle {
+    
+    // Count solutions up to `limit` (fast uniqueness check when limit=2)
+    static func countSolutions(size N: Int, regions: [[Int]], limit: Int = 2) -> Int {
+        var colUsed = Array(repeating: false, count: N)
+        var regUsed = Array(repeating: false, count: N)
+        var sol     = Array(repeating: -1,  count: N)
+        var count   = 0
+
+        func isAdjDiag(_ r1:Int,_ c1:Int,_ r2:Int,_ c2:Int) -> Bool { abs(r1 - r2) == 1 && abs(c1 - c2) == 1 }
+
+        func dfs(_ r:Int) {
+            if count >= limit { return }
+            if r == N { count += 1; return }
+
+            for c in 0..<N where !colUsed[c] {
+                let rg = regions[r][c]; if regUsed[rg] { continue }
+                var ok = true
+                for rr in 0..<r { if isAdjDiag(rr, sol[rr], r, c) { ok = false; break } }
+                if !ok { continue }
+
+                sol[r] = c; colUsed[c] = true; regUsed[rg] = true
+                dfs(r + 1)
+                sol[r] = -1; colUsed[c] = false; regUsed[rg] = false
+
+                if count >= limit { return }
+            }
+        }
+
+        dfs(0)
+        return count
+    }
+
+    // Generate connected regions and require a unique solution; simple fallback
+    static func generateSolvablePuzzle(size N: Int, maxTries: Int = 5000) -> Puzzle {
+        var lastGood: [[Int]]? = nil
         for _ in 0..<maxTries {
             let regs = makeRegions(size: N)
-            if let _ = solve(size: N, regions: regs) { return Puzzle(size: N, regionIds: regs, presetQueens: []) }
+            lastGood = regs
+            if countSolutions(size: N, regions: regs, limit: 2) == 1 {
+                return Puzzle(size: N, regionIds: regs, presetQueens: [])
+            }
         }
-        // Fallback: striped rows (always solvable)
-        let regs = (0..<N).map { r in Array(repeating: r, count: N) }
-        return Puzzle(size: N, regionIds: regs, presetQueens: [])
+        // If we somehow didn't hit uniqueness in many tries, still return the best connected layout (never stripes).
+        return Puzzle(size: N, regionIds: lastGood ?? makeRegions(size: N), presetQueens: [])
     }
 
     func loadNew(size N: Int) {
@@ -297,12 +405,11 @@ extension GameVM {
         rebuildAutoMarks()
     }
 }
-
 // MARK: - UI
 
 struct QueensGameView: View {
     @StateObject private var vm = GameVM(puzzle: samplePuzzles[0])
-    @State private var sizeSelection: Int = 6
+    @State private var sizeSelection: Int = 5
 
     var body: some View {
         NavigationStack {
@@ -371,13 +478,11 @@ struct QueensGameView: View {
                 }
             }
             HStack(spacing: 12) {
-                Picker("Size", selection: $sizeSelection) {
-                    ForEach([5,6,7,8], id: \.self) { s in
-                        Text("\(s)x\(s)").tag(s)
-                    }
-                }
-                .pickerStyle(.segmented)
-                Button("New Puzzle") { vm.loadNew(size: sizeSelection) }
+                Text("Size: 5x5")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("New Puzzle") { vm.loadNew(size: 5) }
                     .buttonStyle(.borderedProminent)
             }
             Toggle("Auto X", isOn: $vm.autoXEnabled)
