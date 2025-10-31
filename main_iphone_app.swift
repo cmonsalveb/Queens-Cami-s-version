@@ -74,6 +74,38 @@ final class GameVM: ObservableObject {
     }
 
     var size: Int { board.size }
+    
+    // ---- Library cache (5x5) ----
+    @Published var levelPuzzles: [Puzzle] = []
+    @Published var currentLevel: Int = 0
+
+    func buildLibraryIfNeeded(count: Int = 8, size: Int = 5) {
+        guard levelPuzzles.count < count else { return }
+        var built: [Puzzle] = levelPuzzles
+        var safety = 5000
+        while built.count < count && safety > 0 {
+            safety -= 1
+            let p = GameVM.generateSolvablePuzzle(size: size, maxTries: 2000)
+            // avoid duplicates by region pattern
+            if !built.contains(where: { $0.regionIds == p.regionIds }) {
+                built.append(p)
+            }
+        }
+        levelPuzzles = built
+    }
+
+
+    func loadLevel(_ index: Int) {
+        guard !levelPuzzles.isEmpty else { return }
+        let i = max(0, min(index, levelPuzzles.count - 1))
+        currentLevel = i
+        let p = levelPuzzles[i]
+        self.puzzle = p
+        self.board = BoardState.empty(size: p.size, preset: p.presetQueens)
+        self.history.removeAll()
+        rebuildAutoMarks()
+    }
+
 
     func reset() {
         board = BoardState.empty(size: size, preset: puzzle.presetQueens)
